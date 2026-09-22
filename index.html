@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ember playground — proof of concept</title>
+
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f7f7f8;
+        --panel: #ffffff;
+        --border: #d9dbe0;
+        --text: #1d2027;
+        --muted: #6b7280;
+        --accent: #e04e39;
+        --error-bg: #fdecec;
+        --error-border: #f0b5b5;
+        --code-bg: #f2f3f5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 16px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      header .badge {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      header .spacer {
+        flex: 1;
+      }
+
+      button {
+        font: inherit;
+        padding: 6px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--text);
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: progress;
+      }
+
+      #status {
+        font-size: 12px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      main {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        min-height: 0;
+      }
+
+      .pane {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .pane + .pane {
+        border-left: 1px solid var(--border);
+      }
+
+      .pane-title {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 12px;
+        min-height: 32px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+
+      .pane-title .spacer {
+        flex: 1;
+      }
+
+      .tab {
+        padding: 3px 10px;
+        font-size: 12px;
+        text-transform: none;
+        letter-spacing: 0;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+      }
+
+      .tab.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+
+      #editor {
+        flex: 1;
+        width: 100%;
+        resize: none;
+        border: 0;
+        outline: none;
+        padding: 12px;
+        font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: var(--panel);
+        color: var(--text);
+        tab-size: 2;
+      }
+
+      #output-wrap {
+        flex: 1;
+        overflow: auto;
+        padding: 16px;
+      }
+
+      #output {
+        min-height: 100%;
+      }
+
+      #output h1,
+      #output h2 {
+        margin: 0 0 8px;
+      }
+
+      #output nav a {
+        margin-right: 12px;
+      }
+
+      #output button {
+        background: #eef0f4;
+      }
+
+      details {
+        border-top: 1px solid var(--border);
+        background: var(--panel);
+      }
+
+      details summary {
+        cursor: pointer;
+        padding: 6px 12px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+
+      pre {
+        margin: 0;
+        padding: 12px;
+        overflow: auto;
+        max-height: 260px;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: var(--code-bg);
+        color: #24292f;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      #error {
+        display: none;
+        margin: 12px 16px 0;
+        padding: 10px 12px;
+        border: 1px solid var(--error-border);
+        border-radius: 6px;
+        background: var(--error-bg);
+        color: #8a1f1f;
+        white-space: pre-wrap;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        max-height: 200px;
+        overflow: auto;
+      }
+
+      #error.visible {
+        display: block;
+      }
+
+      #console {
+        max-height: 160px;
+        overflow: auto;
+        padding: 8px 12px;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      #console .entry {
+        display: flex;
+        gap: 8px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      #console .tag {
+        flex: none;
+        width: 44px;
+        color: var(--muted);
+      }
+
+      #console .error .tag,
+      #console .error .text {
+        color: #b91c1c;
+      }
+
+      #console .warn .tag,
+      #console .warn .text {
+        color: #a16207;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1b1d22;
+          --panel: #23262d;
+          --border: #363a43;
+          --text: #e6e7ea;
+          --muted: #9aa0ab;
+          --error-bg: #3a2124;
+          --error-border: #6b3438;
+          --code-bg: #1b1d22;
+        }
+        pre {
+          color: #d6d8dd;
+        }
+        #output button {
+          background: #2d313a;
+        }
+        #console .error .tag,
+        #console .error .text {
+          color: #f87171;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>Ember Playground</h1>
+      <span class="badge">proof of concept — compiled in your browser, no server</span>
+      <span class="spacer"></span>
+      <span id="status">loading runtime…</span>
+      <button id="run" class="primary" disabled>Run</button>
+    </header>
+
+    <main>
+      <section class="pane">
+        <div class="pane-title">
+          <span>Ember files</span>
+          <span class="spacer"></span>
+          <span id="tabs"></span>
+        </div>
+        <textarea id="editor" spellcheck="false" autocomplete="off"></textarea>
+      </section>
+      <section class="pane">
+        <div class="pane-title">
+          <span>Preview</span>
+          <span class="spacer"></span>
+          <button type="button" class="tab" id="tab-result">Result</button>
+          <button type="button" class="tab" id="tab-compiled">Compiled template</button>
+          <button type="button" class="tab" id="tab-app">App JS</button>
+        </div>
+        <div id="error"></div>
+        <div id="output-wrap"><div id="output"></div></div>
+        <pre id="inspector" hidden>—</pre>
+        <details open>
+          <summary>Console</summary>
+          <div id="console"><div class="entry"><span class="tag">info</span><span class="text">no output</span></div></div>
+        </details>
+      </section>
+    </main>
+
+    <script type="module">
+      /* =====================================================================
+       * Ember, in one page, with no build step.
+       * ---------------------------------------------------------------------
+       * `ember.prod.js` is an AMD bundle with its own tiny loader. It does NOT
+       * define `window.Ember`: it publishes `window.require` / `window.define`,
+       * and the namespace is reached with `require('ember').default`.
+       *
+       * `ember-template-compiler.js` reuses that loader, registers itself as the
+       * AMD module `ember-template-compiler/index`, and calls
+       * `__registerTemplateCompiler(...)` on the runtime. That is what makes
+       * `Ember.HTMLBars.compile` start working — it is a lazy getter that stays
+       * inert until the compiler bundle has been evaluated.
+       *
+       * Template compilation is therefore a *runtime* capability here, which is
+       * exactly what the framework removed from its modern ESM distribution.
+       * ===================================================================== */
+
+      const EMBER_VERSION = '5.12.0';
+      const cdnBaseUrl = 'https://cdn.jsdelivr.net/npm/ember-source@' + EMBER_VERSION + '/dist';
+
+      const loadScript = (src) =>
+        new Promise((resolve, reject) => {
+          const el = document.createElement('script');
+          el.src = src;
+          el.onload = () => resolve(src);
+          el.onerror = () => reject(new Error('Failed to load ' + src));
+          document.head.append(el);
+        });
+
+      let Ember;
+
+      const loadRuntime = async () => {
+        // Order matters: the compiler registers itself with the runtime's loader.
+        await loadScript(cdnBaseUrl + '/ember.prod.js');
+        await loadScript(cdnBaseUrl + '/ember-template-compiler.js');
+        Ember = window.require('ember').default;
+      };
+
+      /* =====================================================================
+       * The one piece of glue a browser host has to supply.
+       * ---------------------------------------------------------------------
+       * Ember 5 removed `Ember.DefaultResolver` from ember-source (it now lives
+       * in the `ember-resolver` addon), but `Application#buildRegistry` still
+       * calls `namespace.Resolver.create(...)` unconditionally. Without a
+       * Resolver, `Application.create()` throws before it ever boots.
+       *
+       * Everything the app needs is either on the namespace (`App.IndexRoute`)
+       * or in `Ember.TEMPLATES`, so the resolver is a dozen lines.
+       * ===================================================================== */
+
+      const classify = (name) =>
+        name
+          .split('/')
+          .map((part) => part.replace(/[-_]([a-z])/g, (_, c) => c.toUpperCase()))
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join('');
+
+      const makeResolver = () =>
+        Ember.Object.extend({
+          namespace: null,
+
+          resolve(fullName) {
+            const separator = fullName.indexOf(':');
+            const type = fullName.slice(0, separator);
+            const name = fullName.slice(separator + 1);
+
+            // `template:*` is registered with `instantiate: false`, so the
+            // registry wants the compiled template factory itself back.
+            if (type === 'template') {
+              return Ember.TEMPLATES[name];
+            }
+
+            return this.namespace[classify(name) + classify(type)];
+          },
+        });
+
+      /* =====================================================================
+       * The project — a few templates plus a script.
+       * ===================================================================== */
+
+      const STARTER_PROJECT = [
+        {
+          path: 'application.hbs',
+          code: [
+            '<div class="app">',
+            '  <h1>Ember {{this.emberVersion}}, in the browser</h1>',
+            '',
+            '  <nav>',
+            '    <LinkTo @route="index">Home</LinkTo>',
+            '    <LinkTo @route="about">About</LinkTo>',
+            '  </nav>',
+            '',
+            '  <hr />',
+            '',
+            '  {{outlet}}',
+            '</div>',
+            '',
+          ].join('\n'),
+        },
+        {
+          path: 'index.hbs',
+          code: [
+            '<h2>Home</h2>',
+            '',
+            '<p>',
+            '  Count is <strong>{{this.count}}</strong>.',
+            '  {{#if this.isZero}}(nothing yet){{/if}}',
+            '</p>',
+            '',
+            '<button type="button" {{action "increment"}}>+1</button>',
+            '<button type="button" {{action "reset"}}>Reset</button>',
+            '',
+            '<p>A component keeps its own state:</p>',
+            '',
+            '{{counter-panel start=10}}',
+            '{{counter-panel start=100}}',
+            '',
+          ].join('\n'),
+        },
+        {
+          path: 'about.hbs',
+          code: [
+            '<h2>About</h2>',
+            '',
+            '<p>{{this.message}}</p>',
+            '',
+            '<p>',
+            '  This template was compiled by <code>ember-template-compiler</code>',
+            '  in this tab, then registered on <code>Ember.TEMPLATES</code>.',
+            '</p>',
+            '',
+          ].join('\n'),
+        },
+        {
+          path: 'components/counter-panel.hbs',
+          code: [
+            '<div class="panel">',
+            '  <span>{{this.label}}: {{this.count}}</span>',
+            '  <button type="button" {{action "bump"}}>bump</button>',
+            '</div>',
+            '',
+          ].join('\n'),
+        },
+        {
+          path: 'app.js',
+          code: [
+            'App.Router.map(function () {',
+            '  this.route("about");',
+            '});',
+            '',
+            'App.ApplicationController = Ember.Controller.extend({',
+            '  emberVersion: Ember.VERSION,',
+            '});',
+            '',
+            'App.IndexController = Ember.Controller.extend({',
+            '  count: 0,',
+            '',
+            '  isZero: Ember.computed("count", function () {',
+            '    return this.get("count") === 0;',
+            '  }),',
+            '',
+            '  actions: {',
+            '    increment() {',
+            '      this.incrementProperty("count");',
+            '    },',
+            '',
+            '    reset() {',
+            '      this.set("count", 0);',
+            '    },',
+            '  },',
+            '});',
+            '',
+            'App.AboutController = Ember.Controller.extend({',
+            '  message: "Two routes, four templates, one script — no server involved.",',
+            '});',
+            '',
+            'App.CounterPanelComponent = Ember.Component.extend({',
+            '  label: "clicks",',
+            '  count: 0,',
+            '',
+            '  didInsertElement() {',
+            '    this._super(...arguments);',
+            '    this.set("count", this.get("start"));',
+            '  },',
+            '',
+            '  actions: {',
+            '    bump() {',
+            '      this.incrementProperty("count");',
+            '    },',
+            '  },',
+            '});',
+            '',
+          ].join('\n'),
+        },
+      ];
+
+      /* =====================================================================
+       * UI plumbing
+       * ===================================================================== */
+
+      const editor = document.getElementById('editor');
+      const tabsEl = document.getElementById('tabs');
+      const output = document.getElementById('output');
+      const inspector = document.getElementById('inspector');
+      const errorEl = document.getElementById('error');
+      const statusEl = document.getElementById('status');
+      const consoleEl = document.getElementById('console');
+      const runButton = document.getElementById('run');
+      const tabButtons = {
+        result: document.getElementById('tab-result'),
+        compiled: document.getElementById('tab-compiled'),
+        app: document.getElementById('tab-app'),
+      };
+
+      const files = STARTER_PROJECT.map((file) => ({ ...file }));
+      let activeFile = files[0];
+      let activeView = 'result';
+      let currentApp = null;
+
+      const isTemplate = (path) => path.endsWith('.hbs');
+      const templateName = (path) => path.replace(/\.hbs$/, '');
+
+      const log = (type, text) => {
+        if (consoleEl.querySelector('.entry .text')?.textContent === 'no output') {
+          consoleEl.replaceChildren();
+        }
+        const entry = document.createElement('div');
+        entry.className = 'entry ' + type;
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = type;
+        const body = document.createElement('span');
+        body.className = 'text';
+        body.textContent = text;
+        entry.append(tag, body);
+        consoleEl.append(entry);
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      };
+
+      const clearConsole = () => {
+        consoleEl.replaceChildren();
+        log('info', 'no output');
+      };
+
+      const setError = (message) => {
+        if (!message) {
+          errorEl.textContent = '';
+          errorEl.classList.remove('visible');
+          return;
+        }
+        errorEl.textContent = message;
+        errorEl.classList.add('visible');
+      };
+
+      const setView = (view) => {
+        activeView = view;
+        for (const [name, button] of Object.entries(tabButtons)) {
+          button.classList.toggle('active', name === view);
+        }
+        if (view === 'result') {
+          document.getElementById('output-wrap').hidden = false;
+          inspector.hidden = true;
+        } else {
+          document.getElementById('output-wrap').hidden = true;
+          inspector.hidden = false;
+        }
+        refreshInspector();
+      };
+
+      const refreshInspector = () => {
+        if (activeView === 'compiled') {
+          if (!isTemplate(activeFile.path)) {
+            inspector.textContent = 'Select a .hbs file to see its compiled output.';
+            return;
+          }
+          try {
+            inspector.textContent = Ember.HTMLBars.precompile(activeFile.code, {
+              moduleName: templateName(activeFile.path),
+            });
+          } catch (error) {
+            inspector.textContent = String((error && error.message) || error);
+          }
+        } else if (activeView === 'app') {
+          inspector.textContent = files.find((file) => file.path.endsWith('.js'))?.code ?? '';
+        }
+      };
+
+      const renderTabs = () => {
+        tabsEl.replaceChildren(
+          ...files.map((file) => {
+            const tab = document.createElement('button');
+            tab.type = 'button';
+            tab.className = 'tab' + (file === activeFile ? ' active' : '');
+            tab.textContent = file.path;
+            tab.title = file.path;
+            tab.addEventListener('click', () => selectFile(file));
+            return tab;
+          }),
+        );
+      };
+
+      const selectFile = (file) => {
+        if (file === activeFile) return;
+        activeFile = file;
+        editor.value = file.code;
+        renderTabs();
+        refreshInspector();
+        editor.focus();
+      };
+
+      editor.addEventListener('input', () => {
+        activeFile.code = editor.value;
+        if (activeView !== 'result') refreshInspector();
+      });
+
+      editor.addEventListener('keydown', (event) => {
+        if (event.key === 'Tab' && !event.shiftKey) {
+          event.preventDefault();
+          const { selectionStart: start, selectionEnd: end } = editor;
+          editor.setRangeText('  ', start, end, 'end');
+          activeFile.code = editor.value;
+        } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          run();
+        }
+      });
+
+      for (const [name, button] of Object.entries(tabButtons)) {
+        button.addEventListener('click', () => setView(name));
+      }
+
+      /* =====================================================================
+       * Run: compile every template, then evaluate the script against a fresh app
+       * ===================================================================== */
+
+      const teardown = () => {
+        if (!currentApp) return;
+        const app = currentApp;
+        currentApp = null;
+        try {
+          Ember.run(() => app.destroy());
+        } catch (error) {
+          log('warn', 'teardown: ' + ((error && error.message) || error));
+        }
+        output.replaceChildren();
+      };
+
+      // Errors thrown inside `new Function` bodies report line numbers relative
+      // to the generated function, which has a two-line preamble.
+      const APP_JS_LINE_OFFSET = 2;
+
+      const buildApp = () => {
+        const jsFile = files.find((file) => file.path.endsWith('.js'));
+        if (!jsFile) {
+          throw new Error('The project needs one .js file (the app script).');
+        }
+
+        // `App` is a staging object, not the application. The registry registers
+        // the base `Router` class as `router:main`, and `Router#_setupRouter`
+        // reads the route map from that class's own `dslCallbacks` — so routes
+        // have to be registered before the application is built, and the
+        // callbacks are per-run state that must be cleared each time.
+        // Everything the script assigns is collected here and handed to
+        // `create()`, which is also what makes `App.IndexController` resolvable.
+        Ember.Router.dslCallbacks = null;
+        const App = { Router: Ember.Router };
+
+        const body = '\n' + jsFile.code + '\n//# sourceURL=' + jsFile.path;
+        let evaluate;
+        try {
+          evaluate = new Function('Ember', 'App', 'TEMPLATES', body);
+        } catch (error) {
+          const message = (error && error.message) || String(error);
+          throw new Error(
+            'in ' + jsFile.path + ' (line numbers in the snippet are offset by ' + APP_JS_LINE_OFFSET + '):\n' + message,
+          );
+        }
+
+        evaluate(Ember, App, Ember.TEMPLATES);
+
+        const app = Ember.Application.create({
+          ...App,
+          rootElement: '#output',
+          // `hash` keeps the router navigable without rewriting the path of
+          // whatever page hosts this (`history` would, and it needs a server).
+          location: 'hash',
+          Resolver: makeResolver(),
+        });
+        return app;
+      };
+
+      const run = async () => {
+        runButton.disabled = true;
+        setError('');
+        clearConsole();
+        const started = performance.now();
+
+        try {
+          // 1. Templates. Names come from the file path, so
+          //    `components/counter-panel.hbs` becomes `components/counter-panel`.
+          //    Compiling happens before the running app is touched, so a compile
+          //    error leaves the last good preview on screen.
+          const templates = files.filter((file) => isTemplate(file.path));
+          const compiled = templates.map((file) => {
+            const name = templateName(file.path);
+            return { name, factory: Ember.HTMLBars.compile(file.code, { moduleName: name }) };
+          });
+
+          // 2. Swap the template registry and rebuild the application.
+          teardown();
+          for (const name of Object.keys(Ember.TEMPLATES)) {
+            delete Ember.TEMPLATES[name];
+          }
+          for (const template of compiled) {
+            Ember.TEMPLATES[template.name] = template.factory;
+          }
+          currentApp = buildApp();
+
+          const elapsed = Math.round(performance.now() - started);
+          statusEl.textContent = 'ran in ' + elapsed + ' ms';
+          log('info', 'compiled ' + compiled.length + ' template(s) with Ember ' + Ember.VERSION);
+          log('info', 'Ember.TEMPLATES: ' + Object.keys(Ember.TEMPLATES).join(', '));
+        } catch (error) {
+          const message = (error && error.message) || String(error);
+          setError(message);
+          statusEl.textContent = 'failed';
+          log('error', message);
+        } finally {
+          runButton.disabled = false;
+        }
+      };
+
+      runButton.addEventListener('click', run);
+
+      /* =====================================================================
+       * Boot
+       * ===================================================================== */
+
+      editor.value = activeFile.code;
+      renderTabs();
+      setView('result');
+
+      loadRuntime()
+        .then(() => {
+          statusEl.textContent = 'Ember ' + Ember.VERSION + ' ready';
+          runButton.disabled = false;
+          return run();
+        })
+        .catch((error) => {
+          const message = (error && error.message) || String(error);
+          setError(message);
+          statusEl.textContent = 'failed to load runtime';
+          log('error', message);
+        });
+    </script>
+  </body>
+</html>
