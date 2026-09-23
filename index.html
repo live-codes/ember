@@ -178,6 +178,16 @@
         background: #eef0f4;
       }
 
+      #output .panel {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        margin: 4px 0;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+      }
+
       details {
         border-top: 1px solid var(--border);
         background: var(--panel);
@@ -196,7 +206,7 @@
         margin: 0;
         padding: 12px;
         overflow: auto;
-        max-height: 260px;
+        max-height: 300px;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         background: var(--code-bg);
         color: #24292f;
@@ -214,7 +224,7 @@
         color: #8a1f1f;
         white-space: pre-wrap;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        max-height: 200px;
+        max-height: 220px;
         overflow: auto;
       }
 
@@ -223,7 +233,7 @@
       }
 
       #console {
-        max-height: 160px;
+        max-height: 150px;
         overflow: auto;
         padding: 8px 12px;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -245,11 +255,6 @@
       #console .error .tag,
       #console .error .text {
         color: #b91c1c;
-      }
-
-      #console .warn .tag,
-      #console .warn .text {
-        color: #a16207;
       }
 
       @media (prefers-color-scheme: dark) {
@@ -280,16 +285,16 @@
   <body>
     <header>
       <h1>Ember Playground</h1>
-      <span class="badge">proof of concept — compiled in your browser, no server</span>
+      <span class="badge">proof of concept — Glimmer components, compiled in your browser</span>
       <span class="spacer"></span>
-      <span id="status">loading runtime…</span>
+      <span id="status">loading toolchain…</span>
       <button id="run" class="primary" disabled>Run</button>
     </header>
 
     <main>
       <section class="pane">
         <div class="pane-title">
-          <span>Ember files</span>
+          <span>App files</span>
           <span class="spacer"></span>
           <span id="tabs"></span>
         </div>
@@ -300,8 +305,7 @@
           <span>Preview</span>
           <span class="spacer"></span>
           <button type="button" class="tab" id="tab-result">Result</button>
-          <button type="button" class="tab" id="tab-compiled">Compiled template</button>
-          <button type="button" class="tab" id="tab-app">App JS</button>
+          <button type="button" class="tab" id="tab-compiled">Compiled output</button>
         </div>
         <div id="error"></div>
         <div id="output-wrap"><div id="output"></div></div>
@@ -315,24 +319,29 @@
 
     <script type="module">
       /* =====================================================================
-       * Ember, in one page, with no build step.
+       * Ember, in one page, with no build step — the modern pipeline.
        * ---------------------------------------------------------------------
-       * `ember.prod.js` is an AMD bundle with its own tiny loader. It does NOT
-       * define `window.Ember`: it publishes `window.require` / `window.define`,
-       * and the namespace is reached with `require('ember').default`.
+       * Every file in the editor is a real ES module with an Ember module
+       * specifier, and it goes through the same three steps a build would run:
        *
-       * `ember-template-compiler.js` reuses that loader, registers itself as the
-       * AMD module `ember-template-compiler/index`, and calls
-       * `__registerTemplateCompiler(...)` on the runtime. That is what makes
-       * `Ember.HTMLBars.compile` start working — it is a lazy getter that stays
-       * inert until the compiler bundle has been evaluated.
+       *   1. content-tag          `<template>` tags -> tagged `template()` calls
+       *   2. @babel/standalone    + babel-plugin-ember-template-compilation,
+       *                           which precompiles the HBS to Ember's wire
+       *                           format and wraps it in `setComponentTemplate`
+       *   3. a CommonJS eval      against ember's own AMD module registry
        *
-       * Template compilation is therefore a *runtime* capability here, which is
-       * exactly what the framework removed from its modern ESM distribution.
+       * The runtime is ember-source's `ember.prod.js` + `ember-template-compiler.js`
+       * (see README: the modern ESM distribution cannot compile templates at
+       * runtime, but the template compiler it publishes is exactly what the
+       * Babel plugin wants as its `compiler` option).
        * ===================================================================== */
 
       const EMBER_VERSION = '5.12.0';
-      const cdnBaseUrl = 'https://cdn.jsdelivr.net/npm/ember-source@' + EMBER_VERSION + '/dist';
+      const emberDistUrl = 'https://cdn.jsdelivr.net/npm/ember-source@' + EMBER_VERSION + '/dist';
+      const babelUrl = 'https://unpkg.com/@babel/standalone@7.26.4/babel.js';
+      const contentTagUrl = 'https://cdn.jsdelivr.net/npm/content-tag@4.2.0/pkg/standalone.js';
+      const templatePluginUrl = 'https://esm.sh/babel-plugin-ember-template-compilation@4.0.0/browser';
+      const glimmerComponentUrl = 'https://cdn.jsdelivr.net/npm/@glimmer/component@2.1.1/dist/index.js';
 
       const loadScript = (src) =>
         new Promise((resolve, reject) => {
@@ -343,63 +352,117 @@
           document.head.append(el);
         });
 
-      let Ember;
+      /* The AMD registry the runtime publishes. Everything under `@ember/*`,
+       * `@glimmer/*` and `ember/*` is already in here. */
+      const emberRequire = (specifier) => window.require(specifier);
 
-      const loadRuntime = async () => {
-        // Order matters: the compiler registers itself with the runtime's loader.
-        await loadScript(cdnBaseUrl + '/ember.prod.js');
-        await loadScript(cdnBaseUrl + '/ember-template-compiler.js');
-        Ember = window.require('ember').default;
+      let Ember;
+      let Babel;
+      let Preprocessor;
+      let templatePlugin;
+      const externalModules = new Map();
+
+      const transformToCommonJs = (source, filename, extraPlugins = []) => {
+        const result = Babel.transform(source, {
+          filename,
+          configFile: false,
+          babelrc: false,
+          // Ember's `@tracked` / `@action` implement the *legacy* decorator
+          // protocol (`(target, key, descriptor)`), so decorated fields have to
+          // be assigned rather than defined — otherwise the initialiser a
+          // decorator installed is clobbered by the field definition.
+          assumptions: { setPublicClassFields: true },
+          plugins: [templatePlugin, ...extraPlugins, 'transform-modules-commonjs'],
+        });
+        // The plugin passes the file name to the template compiler as
+        // `filename`, which the wire format ignores; it reads `moduleName`
+        // instead, which nothing sets for us. Fixing it up post-hoc is the
+        // difference between "(unknown template module)" and the real path in
+        // every template error message.
+        return result.code.split('"(unknown template module)"').join(JSON.stringify(filename));
+      };
+
+      const runCommonJs = (code, require) => {
+        const module = { exports: {} };
+        new Function('require', 'module', 'exports', code + '\n//# sourceURL=' + 'module.js')(
+          require,
+          module,
+          module.exports,
+        );
+        return module.exports;
+      };
+
+      const loadExternalModule = async (specifier, url) => {
+        const source = await fetch(url).then((response) => {
+          if (!response.ok) throw new Error('Failed to fetch ' + url);
+          return response.text();
+        });
+        const exports = runCommonJs(transformToCommonJs(source, specifier), emberRequire);
+        externalModules.set(specifier, exports);
+      };
+
+      const loadToolchain = async () => {
+        // Order matters: the compiler registers itself with the runtime's AMD
+        // loader, and neither publishes a `window.Ember` global.
+        await loadScript(emberDistUrl + '/ember.prod.js');
+        await loadScript(emberDistUrl + '/ember-template-compiler.js');
+        await loadScript(babelUrl);
+
+        Ember = emberRequire('ember').default;
+        Babel = window.Babel;
+
+        const [contentTag, plugin] = await Promise.all([
+          import(/* @vite-ignore */ contentTagUrl),
+          import(/* @vite-ignore */ templatePluginUrl),
+        ]);
+        Preprocessor = contentTag.Preprocessor;
+        templatePlugin = plugin.default || plugin;
+
+        // `@babel/standalone` has no `transformAsync`, but the plugin is an
+        // async factory. Resolving it once — against Babel's own plugin API,
+        // which is only reachable by letting Babel invoke a plugin — yields a
+        // plain PluginObj that the synchronous `transform` accepts.
+        let babelApi;
+        Babel.transform('', {
+          configFile: false,
+          babelrc: false,
+          plugins: [
+            (api) => {
+              babelApi = api;
+              return { visitor: {} };
+            },
+          ],
+        });
+        templatePlugin = await templatePlugin(babelApi, {
+          compiler: emberRequire('ember-template-compiler/minimal'),
+        });
+
+        await loadExternalModule('@glimmer/component', glimmerComponentUrl);
       };
 
       /* =====================================================================
-       * The one piece of glue a browser host has to supply.
-       * ---------------------------------------------------------------------
-       * Ember 5 removed `Ember.DefaultResolver` from ember-source (it now lives
-       * in the `ember-resolver` addon), but `Application#buildRegistry` still
-       * calls `namespace.Resolver.create(...)` unconditionally. Without a
-       * Resolver, `Application.create()` throws before it ever boots.
-       *
-       * Everything the app needs is either on the namespace (`App.IndexRoute`)
-       * or in `Ember.TEMPLATES`, so the resolver is a dozen lines.
-       * ===================================================================== */
-
-      const classify = (name) =>
-        name
-          .split('/')
-          .map((part) => part.replace(/[-_]([a-z])/g, (_, c) => c.toUpperCase()))
-          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-          .join('');
-
-      const makeResolver = () =>
-        Ember.Object.extend({
-          namespace: null,
-
-          resolve(fullName) {
-            const separator = fullName.indexOf(':');
-            const type = fullName.slice(0, separator);
-            const name = fullName.slice(separator + 1);
-
-            // `template:*` is registered with `instantiate: false`, so the
-            // registry wants the compiled template factory itself back.
-            if (type === 'template') {
-              return Ember.TEMPLATES[name];
-            }
-
-            return this.namespace[classify(name) + classify(type)];
-          },
-        });
-
-      /* =====================================================================
-       * The project — a few templates plus a script.
+       * The project — a small but ordinary Ember 5 app layout.
        * ===================================================================== */
 
       const STARTER_PROJECT = [
         {
-          path: 'application.hbs',
+          path: 'router.js',
+          code: [
+            "import EmberRouter from '@ember/routing/router';",
+            '',
+            'export default class Router extends EmberRouter {}',
+            '',
+            'Router.map(function () {',
+            "  this.route('about');",
+            '});',
+            '',
+          ].join('\n'),
+        },
+        {
+          path: 'templates/application.hbs',
           code: [
             '<div class="app">',
-            '  <h1>Ember {{this.emberVersion}}, in the browser</h1>',
+            '  <h1>Ember, compiled in the browser</h1>',
             '',
             '  <nav>',
             '    <LinkTo @route="index">Home</LinkTo>',
@@ -414,104 +477,215 @@
           ].join('\n'),
         },
         {
-          path: 'index.hbs',
+          path: 'templates/index.hbs',
           code: [
             '<h2>Home</h2>',
             '',
-            '<p>',
-            '  Count is <strong>{{this.count}}</strong>.',
-            '  {{#if this.isZero}}(nothing yet){{/if}}',
-            '</p>',
+            '<p>Count is <strong>{{this.count}}</strong>.</p>',
             '',
-            '<button type="button" {{action "increment"}}>+1</button>',
-            '<button type="button" {{action "reset"}}>Reset</button>',
+            '<button type="button" {{on "click" this.increment}}>+1</button>',
+            '<button type="button" {{on "click" this.reset}}>Reset</button>',
             '',
-            '<p>A component keeps its own state:</p>',
+            '<p>Two Glimmer components, each with its own state:</p>',
             '',
-            '{{counter-panel start=10}}',
-            '{{counter-panel start=100}}',
+            '<CounterPanel @start={{10}} />',
+            '<CounterPanel @start={{100}} />',
             '',
           ].join('\n'),
         },
         {
-          path: 'about.hbs',
+          path: 'templates/about.hbs',
           code: [
             '<h2>About</h2>',
             '',
-            '<p>{{this.message}}</p>',
-            '',
             '<p>',
-            '  This template was compiled by <code>ember-template-compiler</code>',
-            '  in this tab, then registered on <code>Ember.TEMPLATES</code>.',
+            '  Every file on the left is compiled in this tab: content-tag rewrites',
+            '  the &lt;template&gt; tags, Babel precompiles the templates to Ember\'s',
+            '  wire format, and the result runs against ember-source.',
             '</p>',
             '',
           ].join('\n'),
         },
         {
-          path: 'components/counter-panel.hbs',
+          path: 'controllers/index.js',
           code: [
-            '<div class="panel">',
-            '  <span>{{this.label}}: {{this.count}}</span>',
-            '  <button type="button" {{action "bump"}}>bump</button>',
-            '</div>',
+            "import Controller from '@ember/controller';",
+            "import { tracked } from '@glimmer/tracking';",
+            '',
+            'export default class IndexController extends Controller {',
+            '  @tracked count = 0;',
+            '',
+            '  increment = () => {',
+            '    this.count++;',
+            '  };',
+            '',
+            '  reset = () => {',
+            '    this.count = 0;',
+            '  };',
+            '}',
             '',
           ].join('\n'),
         },
         {
-          path: 'app.js',
+          path: 'components/counter-panel.gjs',
           code: [
-            'App.Router.map(function () {',
-            '  this.route("about");',
-            '});',
+            "import Component from '@glimmer/component';",
+            "import { tracked } from '@glimmer/tracking';",
+            "import { on } from '@ember/modifier';",
             '',
-            'App.ApplicationController = Ember.Controller.extend({',
-            '  emberVersion: Ember.VERSION,',
-            '});',
+            'export default class CounterPanel extends Component {',
+            '  @tracked count = this.args.start ?? 0;',
             '',
-            'App.IndexController = Ember.Controller.extend({',
-            '  count: 0,',
+            '  bump = () => {',
+            '    this.count++;',
+            '  };',
             '',
-            '  isZero: Ember.computed("count", function () {',
-            '    return this.get("count") === 0;',
-            '  }),',
-            '',
-            '  actions: {',
-            '    increment() {',
-            '      this.incrementProperty("count");',
-            '    },',
-            '',
-            '    reset() {',
-            '      this.set("count", 0);',
-            '    },',
-            '  },',
-            '});',
-            '',
-            'App.AboutController = Ember.Controller.extend({',
-            '  message: "Two routes, four templates, one script — no server involved.",',
-            '});',
-            '',
-            'App.CounterPanelComponent = Ember.Component.extend({',
-            '  label: "clicks",',
-            '  count: 0,',
-            '',
-            '  didInsertElement() {',
-            '    this._super(...arguments);',
-            '    this.set("count", this.get("start"));',
-            '  },',
-            '',
-            '  actions: {',
-            '    bump() {',
-            '      this.incrementProperty("count");',
-            '    },',
-            '  },',
-            '});',
+            '  <template>',
+            '    <div class="panel">',
+            '      <span>clicks: {{this.count}}</span>',
+            '      <button type="button" {{on "click" this.bump}}>bump</button>',
+            '    </div>',
+            '  </template>',
+            '}',
             '',
           ].join('\n'),
         },
       ];
 
       /* =====================================================================
-       * UI plumbing
+       * Module graph
+       * ===================================================================== */
+
+      const userModules = new Map();
+      const loading = new Set();
+      const compiledSources = new Map();
+
+      // Where each kind of file lives, and what it registers as.
+      const registries = { component: {}, controller: {}, route: {} };
+
+      const dirname = (path) => {
+        const index = path.lastIndexOf('/');
+        return index === -1 ? '' : path.slice(0, index);
+      };
+
+      const resolveRelative = (from, specifier) => {
+        const segments = (dirname(from) + '/' + specifier).split('/');
+        const parts = [];
+        for (const segment of segments) {
+          if (segment === '' || segment === '.') continue;
+          if (segment === '..') parts.pop();
+          else parts.push(segment);
+        }
+        const base = parts.join('/');
+        const candidates = [base, base + '.js', base + '.gjs', base + '.hbs', base + '/index.js', base + '/index.gjs'];
+        return candidates.find((candidate) => files.some((file) => file.path === candidate));
+      };
+
+      const isGlimmerTemplate = (source) => /<template[\s>]/.test(source);
+
+      const compile = (path) => {
+        const file = files.find((entry) => entry.path === path);
+        if (!file) throw new Error('No such file: ' + path);
+
+        let source = file.code;
+        if (path.endsWith('.hbs')) {
+          // A route template is a module too: `precompileTemplate` with no
+          // backing class compiles to a bare template factory, which is
+          // exactly what the router looks up.
+          source = [
+            "import { precompileTemplate } from '@ember/template-compilation';",
+            'export default precompileTemplate(' + JSON.stringify(file.code) + ');',
+          ].join('\n');
+        } else if (isGlimmerTemplate(source)) {
+          source = new Preprocessor().process(source, { filename: path }).code;
+        }
+
+        const code = transformToCommonJs(source, path, [
+          ['proposal-decorators', { legacy: true }],
+          // Required order: the decorators transform rewrites fields into
+          // initialiser calls, and these have to run after it. The template
+          // plugin emits `static { setComponentTemplate(...) }`, which the
+          // legacy class-properties transform does not understand on its own.
+          'transform-class-properties',
+          'transform-class-static-block',
+        ]);
+        compiledSources.set(path, code);
+        return code;
+      };
+
+      const moduleRequire = (from) => (specifier) => {
+        if (specifier.startsWith('.')) {
+          const path = resolveRelative(from, specifier);
+          if (!path) throw new Error('Cannot resolve "' + specifier + '" from ' + from);
+          return loadModule(path);
+        }
+        if (externalModules.has(specifier)) return externalModules.get(specifier);
+        return emberRequire(specifier);
+      };
+
+      const loadModule = (path) => {
+        const cached = userModules.get(path);
+        if (cached) return cached;
+        if (loading.has(path)) {
+          throw new Error('Circular import involving ' + path);
+        }
+        loading.add(path);
+        try {
+          const exports = runCommonJs(compile(path), moduleRequire(path));
+          userModules.set(path, exports);
+          return exports;
+        } finally {
+          loading.delete(path);
+        }
+      };
+
+      const registerModules = () => {
+        const collect = (prefix, extensions) => {
+          const found = {};
+          for (const file of files) {
+            if (!file.path.startsWith(prefix)) continue;
+            if (!extensions.some((extension) => file.path.endsWith(extension))) continue;
+            const name = file.path.slice(prefix.length).replace(/\.[^.]+$/, '');
+            found[name] = loadModule(file.path).default;
+          }
+          return found;
+        };
+
+        registries.component = collect('components/', ['.gjs', '.js']);
+        registries.controller = collect('controllers/', ['.js', '.gjs']);
+        registries.route = collect('routes/', ['.js', '.gjs']);
+
+        for (const name of Object.keys(Ember.TEMPLATES)) delete Ember.TEMPLATES[name];
+        for (const [name, template] of Object.entries(collect('templates/', ['.hbs']))) {
+          Ember.TEMPLATES[name] = template;
+        }
+      };
+
+      /* =====================================================================
+       * The one piece of glue a browser host has to supply.
+       * ---------------------------------------------------------------------
+       * Ember 5 removed `Ember.DefaultResolver` from ember-source (it lives in
+       * the `ember-resolver` addon), but `Application#buildRegistry` still calls
+       * `namespace.Resolver.create(...)` unconditionally, so `create()` throws
+       * without one. Everything the app needs is keyed by name here or lives in
+       * `Ember.TEMPLATES`, so the resolver is a handful of lines.
+       * ===================================================================== */
+
+      const makeResolver = () =>
+        Ember.Object.extend({
+          resolve(fullName) {
+            const separator = fullName.indexOf(':');
+            const type = fullName.slice(0, separator);
+            const name = fullName.slice(separator + 1);
+            // `template:*` is registered with `instantiate: false`, so the
+            // registry wants the bare template factory back.
+            if (type === 'template') return Ember.TEMPLATES[name];
+            return registries[type] ? registries[type][name] : undefined;
+          },
+        });
+
+      /* =====================================================================
+       * UI
        * ===================================================================== */
 
       const editor = document.getElementById('editor');
@@ -525,16 +699,12 @@
       const tabButtons = {
         result: document.getElementById('tab-result'),
         compiled: document.getElementById('tab-compiled'),
-        app: document.getElementById('tab-app'),
       };
 
       const files = STARTER_PROJECT.map((file) => ({ ...file }));
-      let activeFile = files[0];
+      let activeFile = files[1];
       let activeView = 'result';
       let currentApp = null;
-
-      const isTemplate = (path) => path.endsWith('.hbs');
-      const templateName = (path) => path.replace(/\.hbs$/, '');
 
       const log = (type, text) => {
         if (consoleEl.querySelector('.entry .text')?.textContent === 'no output') {
@@ -568,37 +738,20 @@
         errorEl.classList.add('visible');
       };
 
+      const refreshInspector = () => {
+        if (activeView !== 'compiled') return;
+        inspector.textContent =
+          compiledSources.get(activeFile.path) ?? 'Nothing compiled yet — press Run.';
+      };
+
       const setView = (view) => {
         activeView = view;
         for (const [name, button] of Object.entries(tabButtons)) {
           button.classList.toggle('active', name === view);
         }
-        if (view === 'result') {
-          document.getElementById('output-wrap').hidden = false;
-          inspector.hidden = true;
-        } else {
-          document.getElementById('output-wrap').hidden = true;
-          inspector.hidden = false;
-        }
+        document.getElementById('output-wrap').hidden = view !== 'result';
+        inspector.hidden = view === 'result';
         refreshInspector();
-      };
-
-      const refreshInspector = () => {
-        if (activeView === 'compiled') {
-          if (!isTemplate(activeFile.path)) {
-            inspector.textContent = 'Select a .hbs file to see its compiled output.';
-            return;
-          }
-          try {
-            inspector.textContent = Ember.HTMLBars.precompile(activeFile.code, {
-              moduleName: templateName(activeFile.path),
-            });
-          } catch (error) {
-            inspector.textContent = String((error && error.message) || error);
-          }
-        } else if (activeView === 'app') {
-          inspector.textContent = files.find((file) => file.path.endsWith('.js'))?.code ?? '';
-        }
       };
 
       const renderTabs = () => {
@@ -608,25 +761,21 @@
             tab.type = 'button';
             tab.className = 'tab' + (file === activeFile ? ' active' : '');
             tab.textContent = file.path;
-            tab.title = file.path;
-            tab.addEventListener('click', () => selectFile(file));
+            tab.addEventListener('click', () => {
+              activeFile = file;
+              editor.value = file.code;
+              renderTabs();
+              refreshInspector();
+              editor.focus();
+            });
             return tab;
           }),
         );
       };
 
-      const selectFile = (file) => {
-        if (file === activeFile) return;
-        activeFile = file;
-        editor.value = file.code;
-        renderTabs();
-        refreshInspector();
-        editor.focus();
-      };
-
       editor.addEventListener('input', () => {
         activeFile.code = editor.value;
-        if (activeView !== 'result') refreshInspector();
+        refreshInspector();
       });
 
       editor.addEventListener('keydown', (event) => {
@@ -646,7 +795,7 @@
       }
 
       /* =====================================================================
-       * Run: compile every template, then evaluate the script against a fresh app
+       * Run
        * ===================================================================== */
 
       const teardown = () => {
@@ -661,50 +810,6 @@
         output.replaceChildren();
       };
 
-      // Errors thrown inside `new Function` bodies report line numbers relative
-      // to the generated function, which has a two-line preamble.
-      const APP_JS_LINE_OFFSET = 2;
-
-      const buildApp = () => {
-        const jsFile = files.find((file) => file.path.endsWith('.js'));
-        if (!jsFile) {
-          throw new Error('The project needs one .js file (the app script).');
-        }
-
-        // `App` is a staging object, not the application. The registry registers
-        // the base `Router` class as `router:main`, and `Router#_setupRouter`
-        // reads the route map from that class's own `dslCallbacks` — so routes
-        // have to be registered before the application is built, and the
-        // callbacks are per-run state that must be cleared each time.
-        // Everything the script assigns is collected here and handed to
-        // `create()`, which is also what makes `App.IndexController` resolvable.
-        Ember.Router.dslCallbacks = null;
-        const App = { Router: Ember.Router };
-
-        const body = '\n' + jsFile.code + '\n//# sourceURL=' + jsFile.path;
-        let evaluate;
-        try {
-          evaluate = new Function('Ember', 'App', 'TEMPLATES', body);
-        } catch (error) {
-          const message = (error && error.message) || String(error);
-          throw new Error(
-            'in ' + jsFile.path + ' (line numbers in the snippet are offset by ' + APP_JS_LINE_OFFSET + '):\n' + message,
-          );
-        }
-
-        evaluate(Ember, App, Ember.TEMPLATES);
-
-        const app = Ember.Application.create({
-          ...App,
-          rootElement: '#output',
-          // `hash` keeps the router navigable without rewriting the path of
-          // whatever page hosts this (`history` would, and it needs a server).
-          location: 'hash',
-          Resolver: makeResolver(),
-        });
-        return app;
-      };
-
       const run = async () => {
         runButton.disabled = true;
         setError('');
@@ -712,30 +817,37 @@
         const started = performance.now();
 
         try {
-          // 1. Templates. Names come from the file path, so
-          //    `components/counter-panel.hbs` becomes `components/counter-panel`.
-          //    Compiling happens before the running app is touched, so a compile
-          //    error leaves the last good preview on screen.
-          const templates = files.filter((file) => isTemplate(file.path));
-          const compiled = templates.map((file) => {
-            const name = templateName(file.path);
-            return { name, factory: Ember.HTMLBars.compile(file.code, { moduleName: name }) };
-          });
+          // Compile everything first: a failure here leaves the last good
+          // preview on screen. Route maps are read off `Ember.Router`'s own
+          // `dslCallbacks` (see README), and they are per-run state.
+          compiledSources.clear();
+          userModules.clear();
+          Ember.Router.dslCallbacks = null;
+          registerModules();
 
-          // 2. Swap the template registry and rebuild the application.
+          const router = files.find((file) => file.path === 'router.js');
+          if (router) {
+            const routeMap = loadModule('router.js').default?.dslCallbacks;
+            if (routeMap) Ember.Router.dslCallbacks = routeMap;
+          }
+
           teardown();
-          for (const name of Object.keys(Ember.TEMPLATES)) {
-            delete Ember.TEMPLATES[name];
-          }
-          for (const template of compiled) {
-            Ember.TEMPLATES[template.name] = template.factory;
-          }
-          currentApp = buildApp();
+
+          // `Autoboot` builds the router inside `create()`, so the route map
+          // above has to exist already.
+          currentApp = Ember.Application.create({
+            rootElement: '#output',
+            // `hash` keeps the router navigable without rewriting the path of
+            // whatever page hosts this (`history` would, and needs a server).
+            location: 'hash',
+            Resolver: makeResolver(),
+          });
 
           const elapsed = Math.round(performance.now() - started);
           statusEl.textContent = 'ran in ' + elapsed + ' ms';
-          log('info', 'compiled ' + compiled.length + ' template(s) with Ember ' + Ember.VERSION);
-          log('info', 'Ember.TEMPLATES: ' + Object.keys(Ember.TEMPLATES).join(', '));
+          log('info', 'compiled ' + userModules.size + ' module(s) with Ember ' + Ember.VERSION);
+          log('info', 'templates: ' + Object.keys(Ember.TEMPLATES).join(', '));
+          log('info', 'components: ' + (Object.keys(registries.component).join(', ') || 'none'));
         } catch (error) {
           const message = (error && error.message) || String(error);
           setError(message);
@@ -748,15 +860,11 @@
 
       runButton.addEventListener('click', run);
 
-      /* =====================================================================
-       * Boot
-       * ===================================================================== */
-
       editor.value = activeFile.code;
       renderTabs();
       setView('result');
 
-      loadRuntime()
+      loadToolchain()
         .then(() => {
           statusEl.textContent = 'Ember ' + Ember.VERSION + ' ready';
           runButton.disabled = false;
@@ -765,7 +873,7 @@
         .catch((error) => {
           const message = (error && error.message) || String(error);
           setError(message);
-          statusEl.textContent = 'failed to load runtime';
+          statusEl.textContent = 'failed to load toolchain';
           log('error', message);
         });
     </script>
